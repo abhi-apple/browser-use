@@ -93,17 +93,17 @@ def _build_locator_command(node: EnhancedDOMTreeNode) -> str:
 	"""Build a best-effort deterministic Optexity locator command for a DOM node."""
 	attributes = node.attributes or {}
 
+	def css_attr_selector(attr_name: str, attr_value: str) -> str:
+		escaped_value = attr_value.replace('\\', '\\\\').replace('"', '\\"')
+		return f'{node.tag_name}[{attr_name}="{escaped_value}"]'
+
 	# Prefer stable form/accessibility attributes over browser-use's transient
 	# element index. XPath is kept as a fallback because it can be brittle across
 	# page changes, but it is still useful when no semantic attributes exist.
-	for attr_name in ('id', 'name', 'aria-label', 'placeholder'):
+	for attr_name in ('id', 'data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 'aria-label', 'placeholder', 'href'):
 		attr_value = attributes.get(attr_name)
 		if attr_value:
-			if attr_name == 'id':
-				selector = f'#{attr_value}'
-			else:
-				selector = f'{node.tag_name}[{attr_name}="{attr_value}"]'
-			return f'locator({selector!r})'
+			return f'locator({css_attr_selector(attr_name, attr_value)!r})'
 
 	return f'locator({"xpath=" + node.xpath!r})'
 
@@ -1087,6 +1087,13 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			if selection_data.get('success') == 'true':
 				# Extract the message from the returned data
 				msg = selection_data.get('message', f'Selected option: {params.text}')
+				await _write_action_cache(
+					'select_dropdown',
+					{'index': params.index, 'text': params.text},
+					node,
+					browser_session,
+					selection_data if isinstance(selection_data, dict) else None,
+				)
 				return ActionResult(
 					extracted_content=msg,
 					include_in_memory=True,
