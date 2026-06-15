@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Generic, TypeVar
 
 try:
@@ -85,6 +87,78 @@ def _detect_sensitive_key_name(text: str, sensitive_data: dict[str, str | dict[s
 				return domain_or_key
 
 	return None
+
+
+def _build_locator_command(node: EnhancedDOMTreeNode) -> str:
+	"""Build a best-effort deterministic Optexity locator command for a DOM node."""
+	attributes = node.attributes or {}
+
+	def css_attr_selector(attr_name: str, attr_value: str) -> str:
+		escaped_value = attr_value.replace('\\', '\\\\').replace('"', '\\"')
+		return f'{node.tag_name}[{attr_name}="{escaped_value}"]'
+
+	# Prefer stable form/accessibility attributes over browser-use's transient
+	# element index. XPath is kept as a fallback because it can be brittle across
+	# page changes, but it is still useful when no semantic attributes exist.
+	for attr_name in ('id', 'data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 'aria-label', 'placeholder', 'href'):
+		attr_value = attributes.get(attr_name)
+		if attr_value:
+			return f'locator({css_attr_selector(attr_name, attr_value)!r})'
+
+	return f'locator({"xpath=" + node.xpath!r})'
+
+
+def _node_cache_payload(node: EnhancedDOMTreeNode) -> dict:
+	ax_node = node.ax_node
+	snapshot_node = node.snapshot_node
+	# Store more than the generated locator so a later optimizer can re-rank or
+	# rebuild selectors without re-running the agentic step.
+	return {
+		'backend_node_id': node.backend_node_id,
+		'tag_name': node.tag_name,
+		'node_name': node.node_name,
+		'xpath': node.xpath,
+		'attributes': dict(node.attributes or {}),
+		'ax_role': ax_node.role if ax_node else None,
+		'ax_name': ax_node.name if ax_node else None,
+		'is_visible': node.is_visible,
+		'is_scrollable': node.is_scrollable,
+		'absolute_position': node.absolute_position.to_dict() if node.absolute_position else None,
+		'viewport_position': snapshot_node.clientRects.to_dict() if snapshot_node and snapshot_node.clientRects else None,
+		'locator_command': _build_locator_command(node),
+	}
+
+
+async def _write_action_cache(
+	action_type: str,
+	params: dict,
+	node: EnhancedDOMTreeNode | None,
+	browser_session: BrowserSession,
+	metadata: dict | None = None,
+) -> None:
+	cache_path = os.getenv('OPTEXITY_ACTION_CACHE_PATH')
+	if not cache_path:
+		return
+
+	try:
+		# Cache logging is intentionally append-only JSONL: every successful
+		# browser-use action becomes one replay candidate for Optexity.
+		payload = {
+			'timestamp': datetime.now(timezone.utc).isoformat(),
+			'action_type': action_type,
+			'page_url': await browser_session.get_current_page_url(),
+			'page_title': await browser_session.get_current_page_title(),
+			'params': params,
+			'node': _node_cache_payload(node) if node else None,
+			'metadata': metadata or {},
+		}
+		path = Path(cache_path)
+		path.parent.mkdir(parents=True, exist_ok=True)
+		with path.open('a') as f:
+			f.write(json.dumps(payload, default=str) + '\n')
+		logger.info('🧠 Cached deterministic action candidate: %s index=%s', action_type, params.get('index'))
+	except Exception as e:
+		logger.debug('Failed to write action cache: %s', e)
 
 
 def handle_browser_error(e: BrowserError) -> ActionResult:
@@ -343,6 +417,13 @@ class Tools(Generic[Context]):
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
 				logger.info(f'🖱️ {memory}')
+				await _write_action_cache(
+					'click',
+					{'index': params.index},
+					node,
+					browser_session,
+					click_metadata if isinstance(click_metadata, dict) else None,
+				)
 
 				# Include click coordinates in metadata if available
 				return ActionResult(
@@ -416,6 +497,13 @@ class Tools(Generic[Context]):
 					log_msg = f"Typed '{params.text}'"
 
 				logger.debug(log_msg)
+				await _write_action_cache(
+					'input_text',
+					{'index': params.index, 'text': None if has_sensitive_data else params.text, 'clear': params.clear},
+					node,
+					browser_session,
+					input_metadata if isinstance(input_metadata, dict) else None,
+				)
 
 				# Include input coordinates in metadata if available
 				return ActionResult(
@@ -999,6 +1087,13 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			if selection_data.get('success') == 'true':
 				# Extract the message from the returned data
 				msg = selection_data.get('message', f'Selected option: {params.text}')
+				await _write_action_cache(
+					'select_dropdown',
+					{'index': params.index, 'text': params.text},
+					node,
+					browser_session,
+					selection_data if isinstance(selection_data, dict) else None,
+				)
 				return ActionResult(
 					extracted_content=msg,
 					include_in_memory=True,
