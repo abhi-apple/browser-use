@@ -1306,6 +1306,7 @@ class BrowserSession(BaseModel):
 		include_screenshot: bool = True,
 		cached: bool = False,
 		include_recent_events: bool = False,
+		include_full_page: bool = False,
 	) -> BrowserStateSummary:
 		if cached and self._cached_browser_state_summary is not None and self._cached_browser_state_summary.dom_state:
 			# Don't use cached state if it has 0 interactive elements

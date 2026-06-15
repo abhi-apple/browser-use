@@ -900,6 +900,7 @@ class SerializedDOMState:
 	def llm_representation(
 		self,
 		include_attributes: list[str] | None = None,
+		remove_empty_nodes: bool = False,
 	) -> str:
 		"""Kinda ugly, but leaving this as an internal method because include_attributes are a parameter on the agent, so we need to leave it as a 2 step process"""
 		from browser_use.dom.serializer.serializer import DOMTreeSerializer

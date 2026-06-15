@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Generic, TypeVar
 
 try:
@@ -85,6 +87,71 @@ def _detect_sensitive_key_name(text: str, sensitive_data: dict[str, str | dict[s
 				return domain_or_key
 
 	return None
+
+
+def _build_locator_command(node: EnhancedDOMTreeNode) -> str:
+	"""Build a best-effort deterministic Optexity locator command for a DOM node."""
+	attributes = node.attributes or {}
+
+	for attr_name in ('id', 'name', 'aria-label', 'placeholder'):
+		attr_value = attributes.get(attr_name)
+		if attr_value:
+			if attr_name == 'id':
+				selector = f'#{attr_value}'
+			else:
+				selector = f'{node.tag_name}[{attr_name}="{attr_value}"]'
+			return f'locator({selector!r})'
+
+	return f'locator({"xpath=" + node.xpath!r})'
+
+
+def _node_cache_payload(node: EnhancedDOMTreeNode) -> dict:
+	ax_node = node.ax_node
+	snapshot_node = node.snapshot_node
+	return {
+		'backend_node_id': node.backend_node_id,
+		'tag_name': node.tag_name,
+		'node_name': node.node_name,
+		'xpath': node.xpath,
+		'attributes': dict(node.attributes or {}),
+		'ax_role': ax_node.role if ax_node else None,
+		'ax_name': ax_node.name if ax_node else None,
+		'is_visible': node.is_visible,
+		'is_scrollable': node.is_scrollable,
+		'absolute_position': node.absolute_position.to_dict() if node.absolute_position else None,
+		'viewport_position': snapshot_node.clientRects.to_dict() if snapshot_node and snapshot_node.clientRects else None,
+		'locator_command': _build_locator_command(node),
+	}
+
+
+async def _write_action_cache(
+	action_type: str,
+	params: dict,
+	node: EnhancedDOMTreeNode | None,
+	browser_session: BrowserSession,
+	metadata: dict | None = None,
+) -> None:
+	cache_path = os.getenv('OPTEXITY_ACTION_CACHE_PATH')
+	if not cache_path:
+		return
+
+	try:
+		payload = {
+			'timestamp': datetime.now(timezone.utc).isoformat(),
+			'action_type': action_type,
+			'page_url': await browser_session.get_current_page_url(),
+			'page_title': await browser_session.get_current_page_title(),
+			'params': params,
+			'node': _node_cache_payload(node) if node else None,
+			'metadata': metadata or {},
+		}
+		path = Path(cache_path)
+		path.parent.mkdir(parents=True, exist_ok=True)
+		with path.open('a') as f:
+			f.write(json.dumps(payload, default=str) + '\n')
+		logger.info('🧠 Cached deterministic action candidate: %s index=%s', action_type, params.get('index'))
+	except Exception as e:
+		logger.debug('Failed to write action cache: %s', e)
 
 
 def handle_browser_error(e: BrowserError) -> ActionResult:
@@ -343,6 +410,13 @@ class Tools(Generic[Context]):
 				# Build memory with element info
 				memory = f'Clicked {element_desc}'
 				logger.info(f'🖱️ {memory}')
+				await _write_action_cache(
+					'click',
+					{'index': params.index},
+					node,
+					browser_session,
+					click_metadata if isinstance(click_metadata, dict) else None,
+				)
 
 				# Include click coordinates in metadata if available
 				return ActionResult(
@@ -416,6 +490,13 @@ class Tools(Generic[Context]):
 					log_msg = f"Typed '{params.text}'"
 
 				logger.debug(log_msg)
+				await _write_action_cache(
+					'input_text',
+					{'index': params.index, 'text': None if has_sensitive_data else params.text, 'clear': params.clear},
+					node,
+					browser_session,
+					input_metadata if isinstance(input_metadata, dict) else None,
+				)
 
 				# Include input coordinates in metadata if available
 				return ActionResult(
