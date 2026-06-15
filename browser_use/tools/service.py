@@ -93,6 +93,9 @@ def _build_locator_command(node: EnhancedDOMTreeNode) -> str:
 	"""Build a best-effort deterministic Optexity locator command for a DOM node."""
 	attributes = node.attributes or {}
 
+	# Prefer stable form/accessibility attributes over browser-use's transient
+	# element index. XPath is kept as a fallback because it can be brittle across
+	# page changes, but it is still useful when no semantic attributes exist.
 	for attr_name in ('id', 'name', 'aria-label', 'placeholder'):
 		attr_value = attributes.get(attr_name)
 		if attr_value:
@@ -108,6 +111,8 @@ def _build_locator_command(node: EnhancedDOMTreeNode) -> str:
 def _node_cache_payload(node: EnhancedDOMTreeNode) -> dict:
 	ax_node = node.ax_node
 	snapshot_node = node.snapshot_node
+	# Store more than the generated locator so a later optimizer can re-rank or
+	# rebuild selectors without re-running the agentic step.
 	return {
 		'backend_node_id': node.backend_node_id,
 		'tag_name': node.tag_name,
@@ -136,6 +141,8 @@ async def _write_action_cache(
 		return
 
 	try:
+		# Cache logging is intentionally append-only JSONL: every successful
+		# browser-use action becomes one replay candidate for Optexity.
 		payload = {
 			'timestamp': datetime.now(timezone.utc).isoformat(),
 			'action_type': action_type,
